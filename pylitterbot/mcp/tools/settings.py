@@ -5,7 +5,11 @@ from __future__ import annotations
 from datetime import datetime
 
 from pylitterbot.enums import BrightnessLevel, NightLightMode
-from pylitterbot.mcp.helpers import resolve_feeder_robot, resolve_litter_robot, resolve_robot
+from pylitterbot.mcp.helpers import (
+    resolve_feeder_robot,
+    resolve_litter_robot,
+    resolve_robot,
+)
 from pylitterbot.mcp.server import mcp
 from pylitterbot.robot.litterrobot4 import LitterRobot4
 from pylitterbot.robot.litterrobot5 import LitterRobot5

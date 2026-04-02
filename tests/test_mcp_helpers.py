@@ -6,7 +6,14 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from pylitterbot import Account, FeederRobot, LitterRobot3, LitterRobot4, LitterRobot5, Pet
+from pylitterbot import (
+    Account,
+    FeederRobot,
+    LitterRobot3,
+    LitterRobot4,
+    LitterRobot5,
+    Pet,
+)
 from pylitterbot.enums import (
     BrightnessLevel,
     GlobeMotorFaultStatus,
