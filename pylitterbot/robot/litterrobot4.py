@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import sys
 from datetime import datetime, timedelta
 from enum import Enum, unique
 from json import dumps
@@ -27,6 +28,11 @@ from ..transport import WebSocketMonitor, WebSocketProtocol
 from ..utils import calculate_litter_level, encode, to_enum, to_timestamp, utcnow
 from .litterrobot import LitterRobot
 from .models import LITTER_ROBOT_4_MODEL
+
+if sys.version_info >= (3, 13):
+    from warnings import deprecated
+else:
+    from typing_extensions import deprecated
 
 if TYPE_CHECKING:
     from ..account import Account
@@ -142,7 +148,6 @@ class LitterRobot4(LitterRobot):  # pylint: disable=abstract-method
     _data_drawer_full_cycles = "DFIFullCounter"
     _data_id = "unitId"
     _data_name = "name"
-    _data_power_status = "unitPowerType"
     _data_serial = "serial"
     _data_setup_date = "setupDateTime"
 
@@ -218,6 +223,11 @@ class LitterRobot4(LitterRobot):  # pylint: disable=abstract-method
     def is_hopper_removed(self) -> bool:
         """Return `True` if the hopper is removed/disabled."""
         return self._data.get("isHopperRemoved") is True
+
+    @property
+    def is_on(self) -> bool:
+        """Return `True` if the robot is on."""
+        return bool(self._data.get("unitPowerStatus", "") == "ON")
 
     @property
     def is_online(self) -> bool:
@@ -302,6 +312,27 @@ class LitterRobot4(LitterRobot):  # pylint: disable=abstract-method
         return cast(float, self._data.get("catWeight", 0))
 
     @property
+    @deprecated("Use power_type instead")
+    def power_status(self) -> str:
+        """Return the power type.
+
+        `AC` = normal/mains
+        `DC` = battery backup
+        `NC` = unknown, not connected or off
+        """
+        return self.power_type
+
+    @property
+    def power_type(self) -> str:
+        """Return the power type.
+
+        `AC` = normal/mains
+        `DC` = battery backup
+        `NC` = unknown, not connected or off
+        """
+        return cast(str, self._data.get("unitPowerType", "NC"))
+
+    @property
     def scoops_saved_count(self) -> int:
         """Return the scoops saved count."""
         return cast(int, self._data.get("scoopsSavedCount", 0))
@@ -319,6 +350,8 @@ class LitterRobot4(LitterRobot):  # pylint: disable=abstract-method
         """
         if not self.is_online:
             return LitterBoxStatus.OFFLINE
+        if not self.is_on:
+            return LitterBoxStatus.OFF
         if status := CYCLE_STATE_STATUS_MAP.get(self._data["robotCycleState"]):
             return status
         status = LR4_STATUS_MAP.get(self._data["robotStatus"], LitterBoxStatus.UNKNOWN)
@@ -729,11 +762,13 @@ class LitterRobot4(LitterRobot):  # pylint: disable=abstract-method
         return is_success
 
     @staticmethod
-    def parse_websocket_message(data: dict) -> dict | None:
-        """Parse a wesocket message."""
+    def parse_websocket_message(data: dict) -> list[dict] | None:
+        """Parse a websocket message."""
         if (data_type := data["type"]) == "data":
-            data = data["payload"]["data"]["litterRobot4StateSubscriptionBySerial"]
-            return data
+            states = data["payload"]["data"]["litterRobot4StateSubscriptionByUser"][
+                "robots"
+            ]
+            return states if isinstance(states, list) else None
         if data_type == "error":
             _LOGGER.error(data)
         elif data_type not in ("start_ack", "ka", "complete"):
@@ -791,11 +826,13 @@ class LitterRobot4(LitterRobot):  # pylint: disable=abstract-method
                     "data": dumps(
                         {
                             "query": f"""
-                                subscription GetLR4($serial: String!) {{
-                                    litterRobot4StateSubscriptionBySerial(serial: $serial) {LITTER_ROBOT_4_MODEL}
+                                subscription GetLR4ByUser($userId: String!) {{
+                                    litterRobot4StateSubscriptionByUser(userId: $userId) {{
+                                        robots {LITTER_ROBOT_4_MODEL}
+                                    }}
                                 }}
                             """,
-                            "variables": {"serial": self.serial},
+                            "variables": {"userId": self._account.user_id},
                         }
                     ),
                     "extensions": {
@@ -818,14 +855,18 @@ class LitterRobot4(LitterRobot):  # pylint: disable=abstract-method
     def _ws_message_handler(self, data: dict) -> None:
         """Handle a message from the WebSocket."""
         parsed = self.parse_websocket_message(data)
-        if isinstance(parsed, dict) and str(parsed.get(self._data_id)) == self.id:
-            self._update_data(parsed)
+        if isinstance(parsed, list):
+            for item in parsed:
+                if isinstance(item, dict) and str(item.get(self._data_id)) == self.id:
+                    self._update_data(item)
+                    break
 
     _WS_PROTOCOL: ClassVar[WebSocketProtocol] = WebSocketProtocol(
         ws_config_factory=_ws_config_factory,
         subscribe_factory=_ws_subscribe,
         unsubscribe_factory=_ws_unsubscribe,
         message_handler=_ws_message_handler,
+        is_shared=True,
     )
 
     def _build_transport(self) -> WebSocketMonitor:

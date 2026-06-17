@@ -15,6 +15,7 @@ from aiohttp import ClientSession
 from botocore.exceptions import ClientError, ParamValidationError
 from pycognito import Cognito
 
+from ._version import __version__
 from .event import EVENT_UPDATE, Event
 from .exceptions import InvalidCommandException
 from .utils import decode, redact, utcnow
@@ -22,6 +23,8 @@ from .utils import decode, redact, utcnow
 T = TypeVar("T", bound="Session")
 
 _LOGGER = logging.getLogger(__name__)
+
+DEFAULT_USER_AGENT = f"pylitterbot/{__version__}"
 
 
 class Session(Event, ABC):
@@ -206,6 +209,7 @@ class LitterRobotSession(Session):
             if (orig := kwargs.get(key)) is not None:
                 value = {**value, **orig} if isinstance(value, dict) else orig
             kwargs[key] = value
+        kwargs.setdefault("headers", {}).setdefault("User-Agent", DEFAULT_USER_AGENT)
         return kwargs
 
     def is_token_valid(self) -> bool:

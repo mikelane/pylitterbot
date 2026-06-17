@@ -8,13 +8,17 @@ from typing import Any
 
 import pytest
 from aiohttp import ClientConnectionError
-from aioresponses import aioresponses
+from aiointercept import CallbackResult, aiointercept
 from freezegun.api import FrozenDateTimeFactory
 from yarl import URL
 
 from pylitterbot import Account
 from pylitterbot.enums import GlobeMotorFaultStatus, LitterBoxStatus
-from pylitterbot.exceptions import InvalidCommandException, LitterRobotException
+from pylitterbot.exceptions import (
+    CameraNotAvailableException,
+    InvalidCommandException,
+    LitterRobotException,
+)
 from pylitterbot.robot.litterrobot5 import (
     LITTER_LEVEL_EMPTY,
     LR5_ENDPOINT,
@@ -51,6 +55,7 @@ async def test_litter_robot_5(
     assert robot.hopper_status == HopperStatus.DISABLED  # case-insensitive match
     assert not robot.is_drawer_full_indicator_triggered
     assert robot.is_hopper_removed is True
+    assert robot.is_on
     assert robot.is_online
     assert not robot.is_sleeping
     assert not robot.is_smart_weight_enabled
@@ -67,7 +72,8 @@ async def test_litter_robot_5(
     assert robot.panel_brightness == BrightnessLevel.LOW  # from displayIntensity
     assert not robot.panel_lock_enabled
     assert robot.pet_weight == 11.04
-    assert robot.power_status == "On"
+    with pytest.warns(DeprecationWarning, match="is_on"):
+        assert robot.power_status == "On"
     assert robot.scoops_saved_count == 80
     assert not robot.sleep_mode_enabled
     assert robot.sleep_mode_start_time is None
@@ -388,7 +394,7 @@ async def test_litter_robot_5_status_code_unknown(
 
 
 async def test_litter_robot_5_refresh(
-    mock_aioresponse: aioresponses,
+    mock_aiointercept: aiointercept,
     mock_account: Account,
 ) -> None:
     """Tests refreshing Litter-Robot 5 data."""
@@ -398,7 +404,7 @@ async def test_litter_robot_5_refresh(
     updated_data = deepcopy(LITTER_ROBOT_5_DATA)
     updated_data["state"]["dfiLevelPercent"] = 50
 
-    mock_aioresponse.get(LR5_GET_URL, payload=updated_data)
+    mock_aiointercept.get(LR5_GET_URL, payload=updated_data)
     await robot.refresh()
     assert robot.waste_drawer_level == 50
 
@@ -406,7 +412,7 @@ async def test_litter_robot_5_refresh(
 
 
 async def test_litter_robot_5_set_name(
-    mock_aioresponse: aioresponses,
+    mock_aiointercept: aiointercept,
     mock_account: Account,
 ) -> None:
     """Tests setting the name on a Litter-Robot 5 via REST PATCH."""
@@ -414,7 +420,7 @@ async def test_litter_robot_5_set_name(
     assert robot.name == "Robo-shitter"
 
     new_name = "Mr. Clean"
-    mock_aioresponse.patch(LR5_GET_URL, payload={})
+    mock_aiointercept.patch(LR5_GET_URL, payload={})
     assert await robot.set_name(new_name)
     assert robot.name == new_name
 
@@ -422,7 +428,7 @@ async def test_litter_robot_5_set_name(
 
 
 async def test_litter_robot_5_set_panel_lockout(
-    mock_aioresponse: aioresponses,
+    mock_aiointercept: aiointercept,
     mock_account: Account,
 ) -> None:
     """Tests toggling the panel lock on a Litter-Robot 5."""
@@ -430,12 +436,12 @@ async def test_litter_robot_5_set_panel_lockout(
     assert not robot.panel_lock_enabled
 
     # Enable panel lock
-    mock_aioresponse.patch(LR5_GET_URL, payload={})
+    mock_aiointercept.patch(LR5_GET_URL, payload={})
     assert await robot.set_panel_lockout(True)
     assert robot.panel_lock_enabled
 
     # Disable panel lock
-    mock_aioresponse.patch(LR5_GET_URL, payload={})  # type: ignore[unreachable]
+    mock_aiointercept.patch(LR5_GET_URL, payload={})  # type: ignore[unreachable]
     assert await robot.set_panel_lockout(False)
     assert not robot.panel_lock_enabled
 
@@ -443,7 +449,7 @@ async def test_litter_robot_5_set_panel_lockout(
 
 
 async def test_litter_robot_5_set_wait_time(
-    mock_aioresponse: aioresponses,
+    mock_aiointercept: aiointercept,
     mock_account: Account,
 ) -> None:
     """Tests setting the wait time on a Litter-Robot 5."""
@@ -451,7 +457,7 @@ async def test_litter_robot_5_set_wait_time(
     assert robot.clean_cycle_wait_time_minutes == 7
 
     # Valid wait time
-    mock_aioresponse.patch(LR5_GET_URL, payload={})
+    mock_aiointercept.patch(LR5_GET_URL, payload={})
     assert await robot.set_wait_time(15)
     assert robot.clean_cycle_wait_time_minutes == 15
 
@@ -463,17 +469,23 @@ async def test_litter_robot_5_set_wait_time(
 
 
 async def test_litter_robot_5_dispatch_command_failure(
-    mock_aioresponse: aioresponses,
+    mock_aiointercept: aiointercept,
     mock_account: Account,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     """Tests that dispatch_command handles errors gracefully."""
     robot = LitterRobot5(data=LITTER_ROBOT_5_DATA, account=mock_account)
 
-    mock_aioresponse.patch(
-        LR5_GET_URL,
-        exception=InvalidCommandException("Test error"),
-    )
+    def _raise_invalid_command(url: URL, **kwargs: Any) -> CallbackResult:
+        return CallbackResult(
+            status=500,
+            payload={
+                "type": "InvalidCommandException",
+                "developerMessage": "Test error",
+            },
+        )
+
+    mock_aiointercept.patch(LR5_GET_URL, payload=None, callback=_raise_invalid_command)
     assert not await robot._dispatch_command("testCommand")
 
     await robot._account.disconnect()
@@ -489,7 +501,7 @@ async def test_litter_robot_5_dispatch_command_failure(
     ],
 )
 async def test_litter_robot_5_commands(
-    mock_aioresponse: aioresponses,
+    mock_aiointercept: aiointercept,
     mock_account: Account,
     method: str,
     command_type: str,
@@ -497,105 +509,102 @@ async def test_litter_robot_5_commands(
     """Tests LR5 operational commands via POST /robots/{serial}/commands."""
     robot = LitterRobot5(data=LITTER_ROBOT_5_DATA, account=mock_account)
 
-    mock_aioresponse.post(LR5_COMMANDS_URL, payload=None)
+    mock_aiointercept.post(LR5_COMMANDS_URL, payload=None)
     assert await getattr(robot, method)()
 
     await robot._account.disconnect()
 
 
 async def test_litter_robot_5_power_on_off(
-    mock_aioresponse: aioresponses,
+    mock_aiointercept: aiointercept,
     mock_account: Account,
 ) -> None:
     """Tests power on/off commands."""
     robot = LitterRobot5(data=LITTER_ROBOT_5_DATA, account=mock_account)
 
     # Power off
-    mock_aioresponse.post(LR5_COMMANDS_URL, payload=None)
+    mock_aiointercept.post(LR5_COMMANDS_URL, payload=None)
     assert await robot.set_power_status(False)
 
     # Power on
-    mock_aioresponse.post(LR5_COMMANDS_URL, payload=None)
+    mock_aiointercept.post(LR5_COMMANDS_URL, payload=None)
     assert await robot.set_power_status(True)
 
     await robot._account.disconnect()
 
 
 async def test_litter_robot_5_set_night_light(
-    mock_aioresponse: aioresponses,
+    mock_aiointercept: aiointercept,
     mock_account: Account,
 ) -> None:
     """Tests night light on/off toggle."""
     robot = LitterRobot5(data=LITTER_ROBOT_5_DATA, account=mock_account)
 
-    mock_aioresponse.patch(LR5_GET_URL, payload={})
+    mock_aiointercept.patch(LR5_GET_URL, payload={})
     assert await robot.set_night_light(True)
 
-    mock_aioresponse.patch(LR5_GET_URL, payload={})
+    mock_aiointercept.patch(LR5_GET_URL, payload={})
     assert await robot.set_night_light(False)
 
     await robot._account.disconnect()
 
 
 async def test_litter_robot_5_set_night_light_brightness(
-    mock_aioresponse: aioresponses,
+    mock_aiointercept: aiointercept,
     mock_account: Account,
 ) -> None:
     """Tests setting night light brightness."""
     robot = LitterRobot5(data=LITTER_ROBOT_5_DATA, account=mock_account)
 
-    mock_aioresponse.patch(LR5_GET_URL, payload={})
+    mock_aiointercept.patch(LR5_GET_URL, payload={})
     assert await robot.set_night_light_brightness(50)
 
     await robot._account.disconnect()
 
 
 async def test_litter_robot_5_set_night_light_mode(
-    mock_aioresponse: aioresponses,
+    mock_aiointercept: aiointercept,
     mock_account: Account,
 ) -> None:
     """Tests setting night light mode."""
     robot = LitterRobot5(data=LITTER_ROBOT_5_DATA, account=mock_account)
 
     for mode in NightLightMode:
-        mock_aioresponse.patch(LR5_GET_URL, payload={})
+        mock_aiointercept.patch(LR5_GET_URL, payload={})
         assert await robot.set_night_light_mode(mode)
 
     await robot._account.disconnect()
 
 
 async def test_litter_robot_5_set_panel_brightness(
-    mock_aioresponse: aioresponses,
+    mock_aiointercept: aiointercept,
     mock_account: Account,
 ) -> None:
     """Tests setting panel brightness."""
     robot = LitterRobot5(data=LITTER_ROBOT_5_DATA, account=mock_account)
 
     for level in BrightnessLevel:
-        mock_aioresponse.patch(LR5_GET_URL, payload={})
+        mock_aiointercept.patch(LR5_GET_URL, payload={})
         assert await robot.set_panel_brightness(level)
 
     await robot._account.disconnect()
 
 
 async def test_litter_robot_5_command_failure(
-    mock_aioresponse: aioresponses,
+    mock_aiointercept: aiointercept,
     mock_account: Account,
 ) -> None:
     """Tests that _send_command handles errors gracefully."""
     robot = LitterRobot5(data=LITTER_ROBOT_5_DATA, account=mock_account)
 
-    mock_aioresponse.post(
-        LR5_COMMANDS_URL,
-        exception=ClientConnectionError("Connection error"),
-    )
+    mock_aiointercept.post(LR5_COMMANDS_URL, exception=True)
     assert not await robot.start_cleaning()
 
     await robot._account.disconnect()
 
 
 async def test_litter_robot_5_activity_history(
-    mock_aioresponse: aioresponses,
+    mock_aiointercept: aiointercept,
     mock_account: Account,
 ) -> None:
     """Tests getting activity history for Litter-Robot 5 via REST endpoint."""
@@ -618,7 +627,7 @@ async def test_litter_robot_5_activity_history(
         },
     ]
     activities_url = f"{LR5_GET_URL}/activities?limit=3"
-    mock_aioresponse.get(activities_url, payload=activities_data)
+    mock_aiointercept.get(activities_url, payload=activities_data)
     activities = await robot.get_activity_history(3)
     assert len(activities) == 3
     assert activities[0].action == "PET_VISIT"
@@ -641,7 +650,7 @@ async def test_litter_robot_5_activity_history_invalid_limit(
 
 
 async def test_litter_robot_5_activity_history_none_response(
-    mock_aioresponse: aioresponses,
+    mock_aiointercept: aiointercept,
     mock_account: Account,
 ) -> None:
     """Tests that activity history raises when response is None."""
@@ -651,7 +660,7 @@ async def test_litter_robot_5_activity_history_none_response(
         raise RuntimeError(url)
 
     activities_url = f"{LR5_GET_URL}/activities?limit=5"
-    mock_aioresponse.get(activities_url, payload=None, callback=_raise_for_request)
+    mock_aiointercept.get(activities_url, payload=None, callback=_raise_for_request)
     with pytest.raises(LitterRobotException):
         await robot.get_activity_history(5)
 
@@ -975,52 +984,61 @@ async def test_litter_robot_5_sound_properties(
 
 
 async def test_litter_robot_5_set_privacy_mode(
-    mock_aioresponse: aioresponses,
+    mock_aiointercept: aiointercept,
     mock_account: Account,
 ) -> None:
     """Tests privacy mode on/off commands."""
     robot = LitterRobot5(data=LITTER_ROBOT_5_DATA, account=mock_account)
 
-    mock_aioresponse.post(LR5_COMMANDS_URL, payload=None)
+    mock_aiointercept.post(LR5_COMMANDS_URL, payload=None)
     assert await robot.set_privacy_mode(True)
 
-    mock_aioresponse.post(LR5_COMMANDS_URL, payload=None)
+    mock_aiointercept.post(LR5_COMMANDS_URL, payload=None)
     assert await robot.set_privacy_mode(False)
 
     await robot._account.disconnect()
 
 
 async def test_litter_robot_5_set_volume(
-    mock_aioresponse: aioresponses,
+    mock_aiointercept: aiointercept,
     mock_account: Account,
 ) -> None:
     """Tests setting sound volume."""
     robot = LitterRobot5(data=LITTER_ROBOT_5_DATA, account=mock_account)
 
-    mock_aioresponse.patch(LR5_GET_URL, payload={})
+    mock_aiointercept.patch(LR5_GET_URL, payload={})
     assert await robot.set_volume(75)
 
     await robot._account.disconnect()
 
 
 async def test_litter_robot_5_set_camera_audio(
-    mock_aioresponse: aioresponses,
+    mock_aiointercept: aiointercept,
     mock_account: Account,
 ) -> None:
-    """Tests toggling camera audio."""
-    robot = LitterRobot5(data=LITTER_ROBOT_5_DATA, account=mock_account)
+    """Tests toggling camera audio via camera API."""
+    robot = LitterRobot5(data=LITTER_ROBOT_5_PRO_DATA, account=mock_account)
 
-    mock_aioresponse.patch(LR5_GET_URL, payload={})
     assert await robot.set_camera_audio(True)
-
-    mock_aioresponse.patch(LR5_GET_URL, payload={})
     assert await robot.set_camera_audio(False)
+    assert not robot.camera_audio_enabled
+
+    await robot._account.disconnect()
+
+
+async def test_litter_robot_5_set_camera_audio_no_camera(
+    mock_account: Account,
+) -> None:
+    """Tests that set_camera_audio raises for robots without a camera."""
+    robot = LitterRobot5(data=LITTER_ROBOT_5_DATA, account=mock_account)
+    with pytest.raises(CameraNotAvailableException):
+        await robot.set_camera_audio(True)
 
     await robot._account.disconnect()
 
 
 async def test_litter_robot_5_get_activities(
-    mock_aioresponse: aioresponses,
+    mock_aiointercept: aiointercept,
     mock_account: Account,
 ) -> None:
     """Tests REST activities endpoint."""
@@ -1053,7 +1071,7 @@ async def test_litter_robot_5_get_activities(
         },
     ]
     activities_url = f"{LR5_GET_URL}/activities?limit=3"
-    mock_aioresponse.get(activities_url, payload=activities_data)
+    mock_aiointercept.get(activities_url, payload=activities_data)
     result = await robot.get_activities(limit=3)
     assert len(result) == 3
     assert result[0]["type"] == "PET_VISIT"
@@ -1082,7 +1100,7 @@ async def test_litter_robot_5_bonnet_removed_state(
 
 
 async def test_litter_robot_5_set_sleep_mode(
-    mock_aioresponse: aioresponses,
+    mock_aiointercept: aiointercept,
     mock_account: Account,
 ) -> None:
     """Tests setting sleep mode via REST PATCH."""
@@ -1090,17 +1108,17 @@ async def test_litter_robot_5_set_sleep_mode(
     assert not robot.sleep_mode_enabled
 
     # Enable sleep for all days
-    mock_aioresponse.patch(LR5_GET_URL, payload={})
+    mock_aiointercept.patch(LR5_GET_URL, payload={})
     assert await robot.set_sleep_mode(value=True, sleep_time=1380, wake_time=420)
     assert robot.sleep_mode_enabled
 
     # Disable sleep for all days
-    mock_aioresponse.patch(LR5_GET_URL, payload={})  # type: ignore[unreachable]
+    mock_aiointercept.patch(LR5_GET_URL, payload={})  # type: ignore[unreachable]
     assert await robot.set_sleep_mode(value=False)
     assert not robot.sleep_mode_enabled
 
     # Enable sleep for a specific day (Sunday=6)
-    mock_aioresponse.patch(LR5_GET_URL, payload={})
+    mock_aiointercept.patch(LR5_GET_URL, payload={})
     assert await robot.set_sleep_mode(
         value=True, sleep_time=1380, wake_time=420, day_of_week=6
     )
@@ -1211,14 +1229,14 @@ async def test_litter_robot_5_sleep_schedule(
 
 async def test_litter_robot_5_reassign_pet_visit(
     mock_account: Account,
-    mock_aioresponse: aioresponses,
+    mock_aiointercept: aiointercept,
 ) -> None:
     """Tests reassign_pet_visit API call."""
     robot = LitterRobot5(data=LITTER_ROBOT_5_DATA, account=mock_account)
     activities_url = f"{LR5_ENDPOINT}/robots/{robot.serial}/activities"
 
     # Successful reassignment
-    mock_aioresponse.patch(
+    mock_aiointercept.patch(
         activities_url,
         payload={
             "messageId": "msg-001",
@@ -1239,10 +1257,7 @@ async def test_litter_robot_5_reassign_pet_visit(
         await robot.reassign_pet_visit(event_id="evt-002")
 
     # API failure returns None
-    mock_aioresponse.patch(
-        activities_url,
-        exception=ClientConnectionError("Connection failed"),
-    )
+    mock_aiointercept.patch(activities_url, exception=True)
     result = await robot.reassign_pet_visit(event_id="evt-003", to_pet_id="PET-bbb")
     assert result is None
 
@@ -1251,17 +1266,17 @@ async def test_litter_robot_5_reassign_pet_visit(
 
 async def test_litter_robot_5_set_night_light_settings(
     mock_account: Account,
-    mock_aioresponse: aioresponses,
+    mock_aiointercept: aiointercept,
 ) -> None:
     """Tests set_night_light_settings sends partial updates."""
     robot = LitterRobot5(data=LITTER_ROBOT_5_DATA, account=mock_account)
     patch_url = URL(f"{LR5_ENDPOINT}/robots/{robot.serial}")
 
-    mock_aioresponse.patch(patch_url, payload={})
+    mock_aiointercept.patch(patch_url, payload={})
     result = await robot.set_night_light_settings(mode=NightLightMode.ON)
     assert result is True
 
-    mock_aioresponse.patch(patch_url, payload={})
+    mock_aiointercept.patch(patch_url, payload={})
     result = await robot.set_night_light_settings(brightness=50, color="#FF0000")
     assert result is True
 

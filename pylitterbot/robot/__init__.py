@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import sys
 from abc import abstractmethod
 from collections.abc import Callable
 from datetime import datetime
@@ -13,6 +14,11 @@ from deepdiff import DeepDiff
 from ..event import EVENT_UPDATE, Event
 from ..transport import Transport
 from ..utils import to_timestamp, urljoin
+
+if sys.version_info >= (3, 13):
+    from warnings import deprecated
+else:
+    from typing_extensions import deprecated
 
 if TYPE_CHECKING:
     from ..account import Account
@@ -35,10 +41,10 @@ class Robot(Event):
     _transport: Transport | None = None
     _subscribed: bool = False
 
-    def __init__(self, data: dict, account: Account) -> None:
+    def __init__(self, data: dict[str, Any], account: Account) -> None:
         """Initialize a robot."""
         super().__init__()
-        self._data: dict = {}
+        self._data: dict[str, Any] = {}
         self._account = account
 
         self._is_loaded = False
@@ -68,6 +74,11 @@ class Robot(Event):
 
     @property
     @abstractmethod
+    def is_on(self) -> bool:
+        """Return `True` if the robot is on."""
+
+    @property
+    @abstractmethod
     def is_online(self) -> bool:
         """Return `True` if the robot is online."""
 
@@ -93,6 +104,7 @@ class Robot(Event):
 
     @property
     @abstractmethod
+    @deprecated("power_status is deprecated")
     def power_status(self) -> str:
         """Return the power type.
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import sys
 from abc import abstractmethod
 from collections.abc import Callable
 from datetime import datetime, time
@@ -14,6 +15,11 @@ from ..enums import LitterBoxCommand, LitterBoxStatus
 from ..sleep_schedule import SleepSchedule
 from ..utils import to_timestamp
 from . import Robot
+
+if sys.version_info >= (3, 13):
+    from warnings import deprecated
+else:
+    from typing_extensions import deprecated
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -96,8 +102,9 @@ class LitterRobot(Robot):
         return to_timestamp(self._data.get("lastSeen"))
 
     @property
+    @deprecated("Use power_type instead")
     def power_status(self) -> str:
-        """Return the power status.
+        """Return the power type.
 
         `AC` = normal/mains
         `DC` = battery backup
